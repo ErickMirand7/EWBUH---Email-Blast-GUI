@@ -1,218 +1,1196 @@
-# Byte-compiled / optimized / DLL files
-__pycache__/
-*.py[codz]
-*$py.class
+#!/usr/bin/env python3
+# ============================================================
+#  EWB-UH Email Blast Tool
+#  Original Author : Erick Miranda - 2025-2026 Chapter President
+#  Contact         : 832-872-5819 | erick202080@gmail.com
+#  SETUP:
+#   1. pip install  (nothing extra needed — all standard library)
+#   2. Gmail App Password: myaccount.google.com -> Security -> App Passwords
+# NOTE THIS USES EWB USA FONT AND COLOR
+# ** This was trouble shot with Claude AI ***
+# ============================================================
 
-# C extensions
-*.so
+import base64, io, json, os, smtplib, tkinter as tk
+from datetime import datetime
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from tkinter import messagebox, ttk, filedialog
 
-# Distribution / packaging
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-share/python-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
+SENDER_EMAIL    = "uoh.ewb@gmail.com"
+APP_PASSWORD    = "cxyj swfu lpqr jsrx"  # Gmail App Password - uoh.ewb@gmail.com
+RECIPIENTS_FILE = "ewb_recipients.json"
+SCRIPT_DIR      = os.path.dirname(os.path.abspath(__file__))
+LOGO_FILE       = os.path.join(SCRIPT_DIR, "ewb_logo.png")  # blue logo for GUI + email
 
-# PyInstaller
-#   Usually these files are written by a python script from a template
-#   before PyInstaller builds the exe, so as to inject date/other infos into it.
-*.manifest
-*.spec
+# ── Logo: load raw bytes at import (for email); PhotoImage built after Tk() ──
+_LOGO_BYTES = None
+_LOGO_TK    = None
+if os.path.exists(LOGO_FILE):
+    with open(LOGO_FILE, "rb") as _f:
+        _LOGO_BYTES = _f.read()
 
-# Installer logs
-pip-log.txt
-pip-delete-this-directory.txt
+def _build_logo_tk(target_h=52, bg_hex="#D6E4F5"):
+    """Build a crisp blue logo composited onto the banner color. Call AFTER Tk()."""
+    global _LOGO_TK
+    src_bytes = _LOGO_BYTES  # blue logo
+    if not src_bytes:
+        return None
+    try:
+        from PIL import Image, ImageTk, ImageFilter
+        img = Image.open(io.BytesIO(src_bytes)).convert("RGBA")
+        r, g, b = tuple(int(bg_hex[i:i+2], 16) for i in (1, 3, 5))
+        # Composite onto banner color at FULL resolution first
+        bg_full = Image.new("RGBA", img.size, (r, g, b, 255))
+        bg_full.paste(img, mask=img.split()[3])
+        flat = bg_full.convert("RGB")
+        # Step down gradually (halving) for cleaner anti-aliasing, then final
+        disp_w = int(img.width * (target_h / img.height))
+        cur = flat
+        while cur.width > disp_w * 2:
+            cur = cur.resize((cur.width // 2, cur.height // 2), Image.LANCZOS)
+        final = cur.resize((disp_w, target_h), Image.LANCZOS)
+        # Light sharpen to crisp up the downscaled edges
+        final = final.filter(
+            ImageFilter.UnsharpMask(radius=1.0, percent=80, threshold=2))
+        _LOGO_TK = ImageTk.PhotoImage(final)
+        return _LOGO_TK
+    except Exception:
+        return None
 
-# Unit test / coverage reports
-htmlcov/
-.tox/
-.nox/
-.coverage
-.coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-*.py.cover
-.hypothesis/
-.pytest_cache/
-cover/
+EMAIL_DOMAINS = ["@gmail.com", "@uh.edu", "@cougarnet.uh.edu",
+                 "@yahoo.com", "@outlook.com", "Custom"]
 
-# Translations
-*.mo
-*.pot
 
-# Django stuff:
-*.log
-local_settings.py
-db.sqlite3
-db.sqlite3-journal
+C = {
+    "bg":             "#F2F6FB",
+    "panel":          "#FFFFFF",
+    "sidebar":        "#E4EDF8",
+    "sidebar_list":   "#D6E3F4",
+    "header_bg":      "#abcae9",   # EWB light blue banner
+    "header_fg":      "#0065b2",   # EWB blue text on banner
+    "header_accent":  "#0065b2",   # EWB blue for the tool title
+    "header_top":     "#0065b2",   # EWB blue top stripe
+    "header_line":    "#0065b2",   # EWB blue accent line under banner
+    "accent":         "#0065b2",   # EWB primary blue
+    "accent_light":   "#DCE9F8",
+    "text":           "#0A0F1A",
+    "text_sub":       "#4B6079",
+    "border":         "#C3D5EC",
+    "border_focus":   "#0065b2",
+    "entry_bg":       "#FFFFFF",
+    "entry_fg":       "#0A0F1A",
+    "select":         "#abcae9",
+    "btn_primary_bg": "#0065b2",   # EWB blue primary button
+    "btn_primary_fg": "#FFFFFF",
+    "btn_ghost_bg":   "#FFFFFF",
+    "btn_ghost_fg":   "#0065b2",
+}
 
-# Flask stuff:
-instance/
-.webassets-cache
 
-# Scrapy stuff:
-.scrapy
+_RB = "Roboto"
+F = {
+    "hdr_title": (_RB, 16, "bold"),
+    "hdr_tool":  (_RB, 15, "bold"),
+    "hdr_sub":   (_RB, 11),
+    "section":   (_RB, 10, "bold"),
+    "label":     (_RB, 12, "bold"),
+    "body":      (_RB, 13),
+    "small":     (_RB, 11),
+    "tiny":      (_RB, 10),
+    "btn_sm":    (_RB, 12, "bold"),
+}
 
-# Sphinx documentation
-docs/_build/
+def _resolve_ui_font():
+    """If Roboto isn't installed, swap _RB to a clean system sans and
+    rebuild the F dict. Hardcoded (_RB, ...) tuples read the updated global
+    when their widgets are built. Must run after Tk() exists."""
+    global _RB
+    try:
+        from tkinter import font as tkfont
+        available = set(tkfont.families())
+        if "Roboto" not in available:
+            _RB = next((f for f in
+                        ("Helvetica Neue", "Helvetica", "Arial", "San Francisco")
+                        if f in available), "TkDefaultFont")
+            for key, spec in list(F.items()):
+                F[key] = (_RB,) + tuple(spec[1:])
+    except Exception:
+        pass
 
-# PyBuilder
-.pybuilder/
-target/
 
-# Jupyter Notebook
-.ipynb_checkpoints
+SIGN_OFF = (
+    "[Insert Name]\n"
+    "[Insert Position]\n"
+    "Engineers Without Borders\n"
+    "University of Houston Chapter"
+)
 
-# IPython
-profile_default/
-ipython_config.py
+def plain_signature(name, position):
+    return (
+        f"{name}\n{position}\n"
+        "Engineers Without Borders\n"
+        "University of Houston Chapter\n"
+        "uoh.ewb@gmail.com  |  832-872-5819"
+    )
 
-# pyenv
-#   For a library or package, you might want to ignore these files since the code is
-#   intended to run in multiple environments; otherwise, check them in:
-# .python-version
+def html_signature(name, position):
+    return f"""
+<table cellpadding="0" cellspacing="0" border="0"
+  style="font-family:'Helvetica Neue',Arial,sans-serif;font-size:13px;
+         color:#374151;margin-top:32px;border-top:1px solid #E2E8F0;padding-top:20px;">
+  <tr><td style="font-weight:700;font-size:15px;color:#0A0F1A;padding-bottom:3px;">{name}</td></tr>
+  <tr><td style="color:#4B5563;padding-bottom:2px;">{position}</td></tr>
+  <tr><td style="color:#4B5563;padding-bottom:2px;">Engineers Without Borders</td></tr>
+  <tr><td style="color:#4B5563;padding-bottom:16px;">University of Houston Chapter</td></tr>
+  <tr><td><a href="mailto:uoh.ewb@gmail.com"
+    style="color:#0065b2;text-decoration:none;">uoh.ewb@gmail.com</a>
+    &nbsp;&nbsp;|&nbsp;&nbsp;832-872-5819</td></tr>
+</table>"""
 
-# pipenv
-#   According to pypa/pipenv#598, it is recommended to include Pipfile.lock in version control.
-#   However, in case of collaboration, if having platform-specific dependencies or dependencies
-#   having no cross-platform support, pipenv may install dependencies that don't work, or not
-#   install all needed dependencies.
-# Pipfile.lock
+def build_html_email(body_plain, name, position, image_cids=None):
+    clean = body_plain.strip()
+    if clean.endswith(SIGN_OFF):
+        clean = clean[:-len(SIGN_OFF)].rstrip()
+    html_body = "".join(
+        '<p style="margin:0 0 18px;line-height:1.75;color:#0A0F1A;">'
+        + p.replace("\n", "<br>") + "</p>"
+        for p in clean.split("\n\n")
+    )
+    # Attached images embedded between body and signature
+    images_html = ""
+    if image_cids:
+        images_html = '<div style="margin:8px 0 20px;">'
+        for cid in image_cids:
+            images_html += (
+                f'<img src="cid:{cid}" '
+                'style="max-width:100%;height:auto;border-radius:6px;'
+                'margin-bottom:14px;display:block;">'
+            )
+        images_html += "</div>"
+    # Logo embedded via Content-ID (cid) — see _send_emails attachment
+    logo_html = (
+        '<img src="cid:ewb_logo" alt="EWB-UH" '
+        'style="height:56px;display:inline-block;">'
+        if _LOGO_BYTES else ""
+    )
+    timestamp = datetime.now().strftime("%B %d, %Y at %I:%M %p")
+    return f"""<!DOCTYPE html><html><head><meta charset="utf-8"></head>
+<body style="margin:0;padding:0;background:#EEF2F8;">
+<table width="100%" cellpadding="0" cellspacing="0"
+  style="background:#EEF2F8;padding:40px 0;">
+<tr><td align="center">
+<table width="600" cellpadding="0" cellspacing="0"
+  style="background:#fff;border-radius:6px;border:1px solid #D1D9E6;overflow:hidden;
+         font-family:'Helvetica Neue',Arial,sans-serif;">
+  <tr>
+    <td style="background:#abcae9;padding:20px 36px;border-bottom:3px solid #0065b2;">
+      <table width="100%" cellpadding="0" cellspacing="0"><tr>
+        <td style="vertical-align:middle;">
+          <span style="color:#0065b2;font-size:13px;font-weight:700;
+                       letter-spacing:.6px;">
+            ENGINEERS WITHOUT BORDERS<br>UNIVERSITY OF HOUSTON
+          </span>
+        </td>
+        <td style="vertical-align:middle;text-align:right;">
+          {logo_html}
+        </td>
+      </tr></table>
+    </td>
+  </tr>
+  <tr>
+    <td style="padding:36px 40px;font-size:15px;line-height:1.75;">
+      {html_body}{images_html}{html_signature(name, position)}
+    </td>
+  </tr>
+  <tr>
+    <td style="background:#F0F4F9;padding:14px 40px;font-size:11px;
+               color:#9CA3AF;border-top:1px solid #D1D9E6;letter-spacing:.4px;">
+      ENGINEERS WITHOUT BORDERS &nbsp;|&nbsp; UNIVERSITY OF HOUSTON CHAPTER
+      &nbsp;&nbsp;
+      <a href="mailto:uoh.ewb@gmail.com"
+         style="color:#0065b2;text-decoration:none;">uoh.ewb@gmail.com</a>
+      <br><span style="color:#B6BEC9;">Sent {timestamp}</span>
+    </td>
+  </tr>
+</table></td></tr></table></body></html>"""
 
-# UV
-#   Similar to Pipfile.lock, it is generally recommended to include uv.lock in version control.
-#   This is especially recommended for binary packages to ensure reproducibility, and is more
-#   commonly ignored for libraries.
-# uv.lock
+# ── Templates ─────────────────────────────────────────────────
+def _body(text):
+    return text.rstrip() + "\n\n" + SIGN_OFF
 
-# poetry
-#   Similar to Pipfile.lock, it is generally recommended to include poetry.lock in version control.
-#   This is especially recommended for binary packages to ensure reproducibility, and is more
-#   commonly ignored for libraries.
-#   https://python-poetry.org/docs/basic-usage/#commit-your-poetrylock-file-to-version-control
-# poetry.lock
-# poetry.toml
+TEMPLATES = {
+    "General Body Meeting": {
+        "subject": "You're Invited! EWB-UH General Body Meeting",
+        "body": _body(
+            "Hey EWB-UH Family!\n\n"
+            "We're so excited to see everyone at our next General Body Meeting! "
+            "Whether you've been with us since day one or you're brand new, "
+            "there's a place for you here. Come hang out, meet the team, and "
+            "find out what we've got cooking this semester.\n\n"
+            "Here are the details:\n\n"
+            "Where : [LOCATION]\n"
+            "When  : [DATE]\n"
+            "Time  : [TIME]\n\n"
+            "We'll have some exciting updates to share, and yes — there will be "
+            "food! Bring a friend, bring your questions, and bring your energy.\n\n"
+            "[ADDITIONAL NOTES]\n\n"
+            "Can't wait to see you there!\n\n"
+            "Warmly,"
+        ),
+    },
+    "Project Meeting": {
+        "subject": "EWB-UH | Project Meeting Reminder",
+        "body": _body(
+            "Dear EWB-UH Member,\n\n"
+            "This is a friendly reminder about our upcoming Project Meeting. "
+            "Your contributions make our projects possible, and we'd love to "
+            "have you there. Please come prepared with any relevant updates "
+            "or materials.\n\n"
+            "Location : [LOCATION]\n"
+            "Date     : [DATE]\n"
+            "Time     : [TIME]\n"
+            "Project  : [PROJECT NAME]\n\n"
+            "Discussion Points:\n"
+            "  - [POINT 1]\n"
+            "  - [POINT 2]\n"
+            "  - [POINT 3]\n\n"
+            "[ADDITIONAL NOTES]\n\n"
+            "Thank you for your continued dedication. We look forward to seeing "
+            "you and making great progress together.\n\n"
+            "Best regards,"
+        ),
+    },
+    "Board Meeting": {
+        "subject": "EWB-UH | Board Meeting Notice",
+        "body": _body(
+            "Dear Board Member,\n\n"
+            "This notice is to confirm our upcoming Board Meeting. Your "
+            "attendance is requested as we will be addressing important "
+            "chapter business and decisions.\n\n"
+            "Location : [LOCATION]\n"
+            "Date     : [DATE]\n"
+            "Time     : [TIME]\n\n"
+            "Agenda:\n"
+            "  1. Call to Order & Approval of Previous Minutes\n"
+            "  2. Officer Reports\n"
+            "  3. [DISCUSSION ITEM]\n"
+            "  4. [DISCUSSION ITEM]\n"
+            "  5. Old Business\n"
+            "  6. New Business\n"
+            "  7. Adjournment\n\n"
+            "[ADDITIONAL NOTES]\n\n"
+            "Please review all materials in advance and come prepared to "
+            "contribute. If you are unable to attend, kindly notify the "
+            "Chapter President as soon as possible so quorum can be confirmed.\n\n"
+            "Respectfully,"
+        ),
+    },
+    "Volunteer Event": {
+        "subject": "Join Us! EWB-UH Volunteer Opportunity",
+        "body": _body(
+            "Hey EWB-UH Family!\n\n"
+            "We've got an awesome volunteer opportunity coming up and we'd "
+            "love for you to be part of it! This is a great chance to give "
+            "back, make a real difference, and hang out with some amazing "
+            "people while doing it.\n\n"
+            "Event    : [EVENT NAME]\n"
+            "Where    : [LOCATION]\n"
+            "When     : [DATE]\n"
+            "Time     : [TIME]\n\n"
+            "What to bring:\n"
+            "  - [ITEM 1]\n"
+            "  - [ITEM 2]\n\n"
+            "[ADDITIONAL NOTES]\n\n"
+            "Every hand makes a difference, and we can't wait to make an "
+            "impact together. Hope to see you there!\n\n"
+            "Warmly,"
+        ),
+    },
+    "Other": {
+        "subject": "EWB-UH | Announcement",
+        "body": _body(
+            "Hey EWB-UH Family!\n\n"
+            "[YOUR MESSAGE HERE]\n\n"
+            "Location : [LOCATION]\n"
+            "Date     : [DATE]\n"
+            "Time     : [TIME]\n\n"
+            "[ADDITIONAL NOTES]\n\n"
+            "Warmly,"
+        ),
+    },
+}
 
-# pdm
-#   Similar to Pipfile.lock, it is generally recommended to include pdm.lock in version control.
-#   pdm recommends including project-wide configuration in pdm.toml, but excluding .pdm-python.
-#   https://pdm-project.org/en/latest/usage/project/#working-with-version-control
-# pdm.lock
-# pdm.toml
-.pdm-python
-.pdm-build/
 
-# pixi
-#   Similar to Pipfile.lock, it is generally recommended to include pixi.lock in version control.
-# pixi.lock
-#   Pixi creates a virtual environment in the .pixi directory, just like venv module creates one
-#   in the .venv directory. It is recommended not to include this directory in version control.
-.pixi
+def load_recipients():
+    if os.path.exists(RECIPIENTS_FILE):
+        with open(RECIPIENTS_FILE) as f:
+            return json.load(f)
+    return ["erick202080@gmail.com"]
 
-# PEP 582; used by e.g. github.com/David-OConnor/pyflow and github.com/pdm-project/pdm
-__pypackages__/
+def save_recipients(r):
+    with open(RECIPIENTS_FILE, "w") as f:
+        json.dump(r, f, indent=2)
 
-# Celery stuff
-celerybeat-schedule
-celerybeat.pid
+# I changed this a bit 
+class EWBEmailApp(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("EWB-UH Email Blast")
+        self.geometry("1160x940")
+        self.minsize(980, 760)
+        self.configure(bg=C["bg"])
+        _resolve_ui_font()  # pick Roboto or a clean fallback before building UI
+        self.recipients = load_recipients()
+        self.attached_images = []  # list of (filename, bytes, cid, is_image)
+        self._build_ui()
 
-# Redis
-*.rdb
-*.aof
-*.pid
+    def _build_ui(self):
+        self._build_header()
 
-# RabbitMQ
-mnesia/
-rabbitmq/
-rabbitmq-data/
+        # Tab bar
+        tab_bar = tk.Frame(self, bg=C["panel"],
+                           highlightbackground=C["border"],
+                           highlightthickness=0)
+        tab_bar.pack(fill="x")
+        tk.Frame(self, bg=C["border"], height=1).pack(fill="x")
 
-# ActiveMQ
-activemq-data/
+        self._tab_frames = {}
+        self._tab_btns   = {}
 
-# SageMath parsed files
-*.sage.py
+        container = tk.Frame(self, bg=C["bg"])
+        container.pack(fill="both", expand=True)
 
-# Environments
-.env
-.envrc
-.venv
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
+        for tab_name in ("Compose", "How It Works"):
+            frame = tk.Frame(container, bg=C["bg"])
+            frame.place(relx=0, rely=0, relwidth=1, relheight=1)
+            self._tab_frames[tab_name] = frame
 
-# Spyder project settings
-.spyderproject
-.spyproject
+            btn = tk.Button(
+                tab_bar, text=tab_name,
+                font=(_RB, 13, "bold"),
+                relief="flat", bd=0,
+                padx=28, pady=13,
+                cursor="hand2",
+                anchor="center",
+                justify="center",
+                command=lambda n=tab_name: self._show_tab(n)
+            )
+            btn.pack(side="left")
+            self._tab_btns[tab_name] = btn
 
-# Rope project settings
-.ropeproject
+        # Build content into each tab
+        self._build_compose_tab(self._tab_frames["Compose"])
+        self._build_howto_tab(self._tab_frames["How It Works"])
+        self._show_tab("Compose")
 
-# mkdocs documentation
-/site
+    def _show_tab(self, name):
+        for n, f in self._tab_frames.items():
+            f.lower()
+        self._tab_frames[name].lift()
+        for n, b in self._tab_btns.items():
+            if n == name:
+                b.config(
+                    bg=C["accent"], fg="#FFFFFF",
+                    activebackground=C["accent"],
+                    activeforeground="#FFFFFF",
+                    font=(_RB, 13, "bold"),
+                    relief="flat", bd=0,
+                    highlightthickness=0,
+                    padx=28, pady=13)
+            else:
+                b.config(
+                    bg=C["panel"], fg="#000000",
+                    activebackground=C["accent_light"],
+                    activeforeground="#000000",
+                    font=(_RB, 13, "bold"),
+                    relief="flat", bd=0,
+                    highlightthickness=0,
+                    padx=28, pady=13)
 
-# mypy
-.mypy_cache/
-.dmypy.json
-dmypy.json
+    def _build_compose_tab(self, parent):
+        body = tk.Frame(parent, bg=C["bg"])
+        body.pack(fill="both", expand=True, padx=28, pady=24)
+        left = tk.Frame(body, bg=C["bg"], width=300)
+        left.pack(side="left", fill="y", padx=(0, 20))
+        left.pack_propagate(False)
+        self._build_sidebar(left)
+        right = tk.Frame(body, bg=C["bg"])
+        right.pack(side="left", fill="both", expand=True)
+        self._build_compose(right)
 
-# Pyre type checker
-.pyre/
+    def _build_howto_tab(self, parent):
+        outer, inner = self._card(parent, padx=40, pady=36)
+        outer.pack(fill="both", expand=True, padx=28, pady=24)
 
-# pytype static type analyzer
-.pytype/
+        def section(title, body_text):
+            tk.Label(inner, text=title.upper(),
+                     font=(_RB, 10, "bold"),
+                     fg=C["accent"], bg=C["panel"]).pack(anchor="w", pady=(18, 4))
+            tk.Frame(inner, bg=C["border"], height=1).pack(fill="x", pady=(0, 8))
+            tk.Label(inner, text=body_text,
+                     font=(_RB, 13),
+                     fg=C["text"], bg=C["panel"],
+                     justify="left", wraplength=820).pack(anchor="w")
 
-# Cython debug symbols
-cython_debug/
+        tk.Label(inner,
+                 text="EWB-UH Email Blast — User Guide",
+                 font=(_RB, 18, "bold"),
+                 fg=C["accent"], bg=C["panel"]).pack(anchor="w")
+        tk.Label(inner,
+                 text="Written by Erick Miranda, 2025-2026 Chapter President",
+                 font=(_RB, 11, "italic"),
+                 fg=C["text_sub"], bg=C["panel"]).pack(anchor="w", pady=(4, 0))
 
-# PyCharm
-#   JetBrains specific template is maintained in a separate JetBrains.gitignore that can
-#   be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
-#   and can be added to the global gitignore or merged into this file.  For a more nuclear
-#   option (not recommended) you can uncomment the following to ignore the entire idea folder.
-# .idea/
+        section("Overview",
+            "This tool sends formatted HTML email reminders to EWB-UH members "
+            "directly from uoh.ewb@gmail.com. No third-party service needed — "
+            "it connects directly to Gmail over a secure SSL connection. "
+            "The recipient list is saved automatically between sessions.")
 
-# Abstra
-#   Abstra is an AI-powered process automation framework.
-#   Ignore directories containing user credentials, local state, and settings.
-#   Learn more at https://abstra.io/docs
-.abstra/
+        section("Step 1 — Add Recipients",
+            "Type a username in the Add Recipient field on the left, then select "
+            "the email domain from the dropdown (@gmail.com, @uh.edu, "
+            "@cougarnet.uh.edu, etc.). Press Enter or click Add. "
+            "To remove someone, click their address in the list and click Remove. "
+            "The list saves to ewb_recipients.json in this folder automatically.")
 
-# Visual Studio Code
-#   Visual Studio Code specific template is maintained in a separate VisualStudioCode.gitignore 
-#   that can be found at https://github.com/github/gitignore/blob/main/Global/VisualStudioCode.gitignore
-#   and can be added to the global gitignore or merged into this file. However, if you prefer, 
-#   you could uncomment the following to ignore the entire vscode folder
-# .vscode/
-# Temporary file for partial code execution
-tempCodeRunnerFile.py
+        section("Step 2 — Fill In Sender Info",
+            "Enter your name and position in the Sender Info fields. These appear "
+            "in the email signature automatically. The signature reads: "
+            "[Your Name] | [Your Position] | Engineers Without Borders | "
+            "University of Houston Chapter")
 
-# Ruff stuff:
-.ruff_cache/
+        section("Step 3 — Choose a Template",
+            "Select a template from the dropdown: General Body Meeting, Project "
+            "Meeting, Board Meeting, Volunteer Event, or Other. The General Body "
+            "and Volunteer templates are warm and student-friendly; Project "
+            "Meeting is professional; Board Meeting is formal with a full agenda. "
+            "Click Load to populate the Subject and Body fields. Then replace all "
+            "[PLACEHOLDERS] — such as [DATE], [TIME], [LOCATION] — with the real "
+            "event details. You can freely edit the body text.")
 
-# PyPI configuration file
-.pypirc
+        section("Step 4 — Gmail App Password",
+            "The App Password is a 16-character code generated by Google that "
+            "allows this tool to send email on behalf of uoh.ewb@gmail.com. "
+            "It is NOT your regular Gmail password. "
+            "To get one: myaccount.google.com -> Security -> "
+            "2-Step Verification -> App Passwords. "
+            "Create one named EWB Email Blast. Google shows the code once — "
+            "copy it and paste it into the App Password field. "
+            "Click the Show/Hide button to reveal what you typed.")
 
-# Marimo
-marimo/_static/
-marimo/_lsp/
-__marimo__/
+        section("Step 5 — Attach Images (Optional)",
+            "To include photos or flyers, click the + Attach Image button above "
+            "the message body. You can select one or more images (PNG, JPG, GIF). "
+            "They will be embedded inside the email so recipients see them inline, "
+            "not as separate downloads. The count shows next to the button — click "
+            "that text to clear all attached images. Keep each image under 10 MB. "
+            "Note: pasting an image directly into the body text box does NOT work; "
+            "always use the Attach Image button.")
 
-# Streamlit
-.streamlit/secrets.toml
+        section("Step 6 — Preview and Send",
+            "Click Preview to review the plain-text version of the email before "
+            "sending. When ready, click Send Blast. The tool will ask for "
+            "confirmation, then connect to Gmail and send individually to each "
+            "recipient. A summary appears when complete showing sent and any failed.")
+
+        section("Notes for Future Officers",
+            "This script is plain Python — no installation beyond Anaconda is "
+            "needed. To hand off to the next president: update the sender name and "
+            "position fields, generate a new App Password for the new officer, and "
+            "share this folder. The recipient list (ewb_recipients.json) carries "
+            "over automatically. Contact Erick Miranda at erick202080@gmail.com "
+            "or 832-872-5819 with questions.")
+
+
+
+
+    def _build_header(self):
+        # Thin navy top stripe
+        tk.Frame(self, bg=C["header_top"], height=4).pack(fill="x")
+
+        # Light blue header banner
+        hdr = tk.Frame(self, bg=C["header_bg"])
+        hdr.pack(fill="x")
+
+        # Navy accent line beneath the banner
+        tk.Frame(self, bg=C["header_line"], height=3).pack(fill="x")
+
+        # Blue logo on the left (composited onto the light banner color)
+        left_hdr = tk.Frame(hdr, bg=C["header_bg"], padx=26, pady=14)
+        left_hdr.pack(side="left")
+        logo_img = _build_logo_tk(60, bg_hex=C["header_bg"])
+        if logo_img:
+            tk.Label(left_hdr, image=logo_img,
+                     bg=C["header_bg"]).pack(side="left")
+        else:
+            tk.Label(left_hdr, text="Engineers Without Borders",
+                     font=(_RB, 15, "bold"),
+                     fg=C["header_fg"], bg=C["header_bg"]).pack(anchor="w")
+
+        # Tool name + sender on the right, in navy
+        right_hdr = tk.Frame(hdr, bg=C["header_bg"], padx=26)
+        right_hdr.pack(side="right", fill="y")
+        rr = tk.Frame(right_hdr, bg=C["header_bg"])
+        rr.pack(side="right", fill="y", expand=True)
+        tk.Label(rr, text="Email Blast Tool",
+                 font=(_RB, 16, "bold"),
+                 fg=C["header_accent"], bg=C["header_bg"]).pack(anchor="e", pady=(16, 0))
+        tk.Label(rr, text=f"Sending from   {SENDER_EMAIL}",
+                 font=F["hdr_sub"], fg="#3A5578",
+                 bg=C["header_bg"]).pack(anchor="e", pady=(3, 0))
+
+    # ── Shared helpers ────────────────────────────────────────
+    def _card(self, parent, bg=None, padx=22, pady=20):
+        bg = bg or C["panel"]
+        outer = tk.Frame(parent, bg=C["border"], padx=1, pady=1)
+        inner = tk.Frame(outer, bg=bg, padx=padx, pady=pady)
+        inner.pack(fill="both", expand=True)
+        return outer, inner
+
+    def _sec(self, parent, text, bg=None):
+        bg = bg or C["panel"]
+        tk.Label(parent, text=text.upper(),
+                 font=F["section"], fg=C["text_sub"],
+                 bg=bg).pack(anchor="w")
+        tk.Frame(parent, bg=C["border"], height=1).pack(fill="x", pady=(5, 12))
+
+    def _entry(self, parent, **kw):
+        return tk.Entry(parent,
+                        bg=C["entry_bg"], fg=C["entry_fg"],
+                        insertbackground=C["accent"],
+                        relief="flat",
+                        highlightbackground=C["border"],
+                        highlightcolor=C["border_focus"],
+                        highlightthickness=1,
+                        font=F["body"], **kw)
+
+    def _btn(self, parent, text, cmd, bg, fg, width=None):
+        kw = dict(text=text, command=cmd, bg=bg, fg=fg,
+                  activebackground=C["accent_light"],
+                  activeforeground=C["accent"],
+                  font=F["btn_sm"], relief="flat", bd=0,
+                  padx=16, pady=9, cursor="hand2")
+        if width:
+            kw["width"] = width
+        return tk.Button(parent, **kw)
+
+    # ── Sidebar ──────────────────────────────────────────────
+    def _build_sidebar(self, parent):
+        outer, inner = self._card(parent, bg=C["sidebar"], padx=16, pady=16)
+        outer.pack(fill="both", expand=True)
+
+        self._sec(inner, "Recipients", bg=C["sidebar"])
+
+        lf = tk.Frame(inner, bg=C["border"], padx=1, pady=1)
+        lf.pack(fill="both", expand=True)
+        sb = tk.Scrollbar(lf, bd=0, width=10,
+                          troughcolor=C["sidebar_list"])
+        sb.pack(side="right", fill="y")
+        self.recipient_listbox = tk.Listbox(
+            lf, yscrollcommand=sb.set,
+            bg=C["sidebar_list"], fg=C["text"],
+            selectbackground=C["select"],
+            selectforeground=C["text"],
+            font=F["body"], relief="flat", bd=0,
+            activestyle="none", highlightthickness=0)
+        self.recipient_listbox.pack(fill="both", expand=True, padx=6, pady=6)
+        sb.config(command=self.recipient_listbox.yview)
+        for r in self.recipients:
+            self.recipient_listbox.insert(tk.END, r)
+
+        tk.Frame(inner, bg=C["border"], height=1).pack(fill="x", pady=(14, 0))
+        tk.Label(inner, text="ADD RECIPIENT",
+                 font=F["section"], fg=C["text_sub"],
+                 bg=C["sidebar"]).pack(anchor="w", pady=(12, 6))
+
+        add_row = tk.Frame(inner, bg=C["sidebar"])
+        add_row.pack(fill="x", pady=(0, 10))
+        self.username_entry = self._entry(add_row)
+        self.username_entry.pack(side="left", fill="x", expand=True, ipady=5)
+        self.username_entry.bind("<Return>", lambda e: self._add_recipient())
+
+        self.domain_var = tk.StringVar(value="@gmail.com")
+        s = ttk.Style()
+        s.configure("Dom.TCombobox",
+                    fieldbackground=C["entry_bg"],
+                    background=C["entry_bg"],
+                    foreground=C["text"],
+                    selectbackground=C["select"],
+                    selectforeground=C["text"])
+        domain_cb = ttk.Combobox(
+            add_row, textvariable=self.domain_var,
+            values=EMAIL_DOMAINS, state="readonly",
+            style="Dom.TCombobox", font=F["small"], width=13)
+        domain_cb.pack(side="left", padx=(6, 0), ipady=5)
+        domain_cb.bind("<<ComboboxSelected>>", self._on_domain_change)
+
+        br = tk.Frame(inner, bg=C["sidebar"])
+        br.pack(fill="x")
+        tk.Button(br, text="Add",
+                  command=self._add_recipient,
+                  font=(_RB, 12, "bold"),
+                  bg="#FFFFFF", fg="#000000",
+                  activebackground="#E2EAF6",
+                  activeforeground="#000000",
+                  relief="solid", bd=1,
+                  highlightbackground="#CDD5E0",
+                  padx=16, pady=8,
+                  cursor="hand2").pack(side="left", fill="x", expand=True, padx=(0, 8))
+        tk.Button(br, text="Remove",
+                  command=self._remove_recipient,
+                  font=(_RB, 12, "bold"),
+                  bg="#FFFFFF", fg="#991B1B",
+                  activebackground="#FEF2F2",
+                  activeforeground="#991B1B",
+                  relief="solid", bd=1,
+                  highlightbackground="#FECACA",
+                  padx=16, pady=8,
+                  cursor="hand2").pack(side="left", fill="x", expand=True)
+
+        self.count_var = tk.StringVar()
+        self._update_count()
+        tk.Label(inner, textvariable=self.count_var,
+                 font=F["tiny"], fg=C["text_sub"],
+                 bg=C["sidebar"]).pack(anchor="w", pady=(10, 0))
+
+    def _on_domain_change(self, _=None):
+        if self.domain_var.get() == "Custom":
+            self.domain_var.set("@")
+
+    # ── Compose ──────────────────────────────────────────────
+    def _build_compose(self, parent):
+        outer, inner = self._card(parent, padx=26, pady=22)
+        outer.pack(fill="both", expand=True)
+
+        self._sec(inner, "Sender Info")
+        sr = tk.Frame(inner, bg=C["panel"])
+        sr.pack(fill="x")
+        tk.Label(sr, text="Name", font=F["label"],
+                 fg=C["text_sub"], bg=C["panel"]).grid(
+            row=0, column=0, sticky="w", padx=(0, 8))
+        self.sender_name = self._entry(sr, width=22)
+        self.sender_name.insert(0, "Erick Miranda")
+        self.sender_name.grid(row=0, column=1, sticky="ew",
+                              padx=(0, 26), ipady=5)
+        tk.Label(sr, text="Position", font=F["label"],
+                 fg=C["text_sub"], bg=C["panel"]).grid(
+            row=0, column=2, sticky="w", padx=(0, 8))
+        self.sender_position = self._entry(sr)
+        self.sender_position.insert(0, "2025-2026 Chapter President")
+        self.sender_position.grid(row=0, column=3, sticky="ew", ipady=5)
+        sr.columnconfigure(3, weight=1)
+
+        self.sig_preview_var = tk.StringVar()
+        self._update_sig_preview()
+        self.sender_name.bind("<KeyRelease>",
+                              lambda e: self._update_sig_preview())
+        self.sender_position.bind("<KeyRelease>",
+                                  lambda e: self._update_sig_preview())
+
+        strip = tk.Frame(inner, bg=C["accent_light"],
+                         highlightbackground=C["border"],
+                         highlightthickness=1)
+        strip.pack(fill="x", pady=(12, 0))
+        tk.Label(strip, textvariable=self.sig_preview_var,
+                 font=F["tiny"], fg=C["accent"],
+                 bg=C["accent_light"], anchor="w",
+                 padx=14, pady=8).pack(fill="x")
+
+        tk.Frame(inner, bg=C["border"], height=1).pack(fill="x", pady=(18, 0))
+        tk.Label(inner, text="TEMPLATE",
+                 font=F["section"], fg=C["text_sub"],
+                 bg=C["panel"]).pack(anchor="w", pady=(12, 7))
+        tmpl_row = tk.Frame(inner, bg=C["panel"])
+        tmpl_row.pack(fill="x", pady=(0, 14))
+        self.template_var = tk.StringVar(value=list(TEMPLATES.keys())[0])
+        ts = ttk.Style()
+        ts.configure("EWB.TCombobox",
+                     fieldbackground=C["entry_bg"],
+                     background=C["entry_bg"],
+                     foreground=C["text"],
+                     selectbackground=C["select"],
+                     selectforeground=C["text"],
+                     bordercolor=C["border"])
+        combo = ttk.Combobox(tmpl_row, textvariable=self.template_var,
+                             values=list(TEMPLATES.keys()),
+                             state="readonly", style="EWB.TCombobox",
+                             font=F["body"])
+        combo.pack(side="left", fill="x", expand=True, ipady=5)
+        combo.bind("<<ComboboxSelected>>", self._load_template)
+        tk.Button(tmpl_row, text="Load",
+                  command=self._load_template,
+                  font=(_RB, 13, "bold"),
+                  bg="#FFFFFF", fg="#000000",
+                  activebackground="#E2EAF6",
+                  activeforeground="#000000",
+                  relief="solid", bd=1,
+                  highlightbackground="#CDD5E0",
+                  padx=18, pady=8,
+                  cursor="hand2").pack(side="left", padx=(12, 0))
+
+        # Date row
+        date_row = tk.Frame(inner, bg=C["panel"])
+        date_row.pack(fill="x", pady=(0, 12))
+        tk.Label(date_row, text="EVENT DATE",
+                 font=F["section"], fg=C["text_sub"],
+                 bg=C["panel"]).pack(side="left", padx=(0, 10))
+        self.date_entry = self._entry(date_row, width=18)
+        self.date_entry.insert(0, datetime.now().strftime("%B %d, %Y"))
+        self.date_entry.pack(side="left", ipady=5)
+        tk.Label(date_row,
+                 text="(auto-fills [DATE] placeholder)",
+                 font=F["tiny"], fg=C["text_sub"],
+                 bg=C["panel"]).pack(side="left", padx=(10, 0))
+
+        tk.Label(inner, text="SUBJECT",
+                 font=F["section"], fg=C["text_sub"],
+                 bg=C["panel"]).pack(anchor="w", pady=(0, 4))
+        self.subject_entry = self._entry(inner)
+        self.subject_entry.pack(fill="x", ipady=6, pady=(0, 14))
+
+        body_hdr = tk.Frame(inner, bg=C["panel"])
+        body_hdr.pack(fill="x", pady=(0, 4))
+        tk.Label(body_hdr,
+                 text="MESSAGE BODY  —  replace [PLACEHOLDERS] before sending",
+                 font=F["section"], fg=C["text_sub"],
+                 bg=C["panel"]).pack(side="left")
+
+        # Attach button + count, right-aligned on the body header row
+        tk.Button(body_hdr, text="+ Attach Image / PDF",
+                  command=self._attach_image,
+                  font=(_RB, 11, "bold"),
+                  bg="#FFFFFF", fg="#0065b2",
+                  activebackground="#E2EAF6",
+                  activeforeground="#0065b2",
+                  relief="solid", bd=1,
+                  highlightbackground="#CDD5E0",
+                  padx=12, pady=4,
+                  cursor="hand2").pack(side="right")
+        self.img_count_var = tk.StringVar(value="")
+        img_count_lbl = tk.Label(body_hdr, textvariable=self.img_count_var,
+                 font=F["tiny"], fg=C["accent"],
+                 bg=C["panel"], cursor="hand2")
+        img_count_lbl.pack(side="right", padx=(0, 10))
+        img_count_lbl.bind("<Button-1>", lambda e: self._clear_images())
+
+        # ── Bottom action bar packed FIRST so it anchors to bottom ──
+        tk.Frame(inner, bg=C["border"], height=1).pack(
+            side="bottom", fill="x", pady=(8, 0))
+        bottom = tk.Frame(inner, bg=C["panel"], pady=12)
+        bottom.pack(side="bottom", fill="x")
+
+        # App password is hardcoded — show it as info text
+        pw_block = tk.Frame(bottom, bg=C["panel"])
+        pw_block.pack(side="left")
+        tk.Label(pw_block, text="SENDING AS",
+                 font=F["section"], fg=C["text_sub"],
+                 bg=C["panel"]).pack(anchor="w", pady=(0, 4))
+        tk.Label(pw_block, text=f"{SENDER_EMAIL}  —  App Password configured",
+                 font=F["small"], fg=C["accent"],
+                 bg=C["panel"]).pack(anchor="w")
+        self.status_var = tk.StringVar(value="No blast sent yet this session")
+        tk.Label(pw_block, textvariable=self.status_var,
+                 font=F["tiny"], fg=C["text_sub"],
+                 bg=C["panel"]).pack(anchor="w", pady=(2, 0))
+
+        btn_block = tk.Frame(bottom, bg=C["panel"])
+        btn_block.pack(side="right")
+        tk.Button(btn_block, text="Preview",
+                  command=self._preview,
+                  font=(_RB, 13, "bold"),
+                  bg="#FFFFFF", fg="#000000",
+                  activebackground="#E2EAF6",
+                  activeforeground="#000000",
+                  relief="solid", bd=1,
+                  highlightbackground="#CDD5E0",
+                  padx=18, pady=10,
+                  cursor="hand2").pack(side="left", padx=(0, 10))
+        # On macOS tk.Button bg is unreliable; wrap in a navy Frame so the
+        # color always shows. The Label acts as the button face.
+        send_wrap = tk.Frame(btn_block, bg="#0065b2",
+                             highlightbackground="#004a85",
+                             highlightthickness=1)
+        send_wrap.pack(side="left")
+        send_lbl = tk.Label(send_wrap, text="Send Blast",
+                            font=(_RB, 13, "bold"),
+                            bg="#0065b2", fg="#FFFFFF",
+                            padx=24, pady=11, cursor="hand2")
+        send_lbl.pack()
+        send_lbl.bind("<Button-1>", lambda e: self._send_emails())
+        send_lbl.bind("<Enter>", lambda e: send_lbl.config(bg="#004a85"))
+        send_lbl.bind("<Leave>", lambda e: send_lbl.config(bg="#0065b2"))
+
+        # ── Body text fills remaining space above action bar ──
+        bf = tk.Frame(inner, bg=C["border"], padx=1, pady=1)
+        bf.pack(side="top", fill="both", expand=True)
+        bsb = tk.Scrollbar(bf, bd=0, width=10)
+        bsb.pack(side="right", fill="y")
+        self.body_text = tk.Text(
+            bf, yscrollcommand=bsb.set,
+            bg=C["entry_bg"], fg=C["text"],
+            insertbackground=C["accent"],
+            font=F["body"], relief="flat", bd=0,
+            wrap="word", padx=14, pady=12,
+            selectbackground=C["select"],
+            highlightthickness=0,
+            spacing1=2, spacing3=2)
+        self.body_text.pack(fill="both", expand=True)
+        bsb.config(command=self.body_text.yview)
+        self.body_text.bind("<Command-z>",
+            lambda e: (self.body_text.edit_undo(), "break"))
+        self.body_text.bind("<Command-Z>",
+            lambda e: (self.body_text.edit_redo(), "break"))
+        self.body_text.bind("<Control-z>",
+            lambda e: (self.body_text.edit_undo(), "break"))
+        self.body_text.bind("<Control-y>",
+            lambda e: (self.body_text.edit_redo(), "break"))
+        self.body_text.config(undo=True, maxundo=50)
+        self._load_template()
+
+
+
+    # ── Logic ────────────────────────────────────────────────
+    def _update_count(self):
+        n = len(self.recipients)
+        self.count_var.set(f"{n} recipient{'s' if n != 1 else ''}")
+
+    def _update_sig_preview(self):
+        name = self.sender_name.get().strip() or "[Name]"
+        pos  = self.sender_position.get().strip() or "[Position]"
+        self.sig_preview_var.set(
+            f"Signature  |  {name}  |  {pos}  |  "
+            "Engineers Without Borders - UH")
+
+    def _add_recipient(self):
+        username = self.username_entry.get().strip()
+        domain   = self.domain_var.get().strip()
+        if not username:
+            return
+        email = username if "@" in username else username + domain
+        if "@" not in email or "." not in email.split("@")[-1]:
+            messagebox.showerror("Invalid Email",
+                f'"{email}" is not a valid address.')
+            return
+        if email in self.recipients:
+            messagebox.showwarning("Duplicate",
+                f"{email} is already in the list.")
+            return
+        self.recipients.append(email)
+        self.recipient_listbox.insert(tk.END, email)
+        save_recipients(self.recipients)
+        self.username_entry.delete(0, tk.END)
+        self._update_count()
+
+    def _remove_recipient(self):
+        sel = self.recipient_listbox.curselection()
+        if not sel:
+            messagebox.showinfo("Select a recipient",
+                "Click an email address in the list to select it.")
+            return
+        idx   = sel[0]
+        email = self.recipients[idx]
+        if messagebox.askyesno("Remove Recipient",
+                f"Remove {email} from the list?"):
+            self.recipients.pop(idx)
+            self.recipient_listbox.delete(idx)
+            save_recipients(self.recipients)
+            self._update_count()
+
+    def _load_template(self, _=None):
+        t = TEMPLATES[self.template_var.get()]
+        self.subject_entry.delete(0, tk.END)
+        self.subject_entry.insert(0, t["subject"])
+        self.body_text.delete("1.0", tk.END)
+        self.body_text.insert("1.0", t["body"])
+
+    def _get_composed(self):
+        date_val = self.date_entry.get().strip() or datetime.now().strftime("%B %d, %Y")
+        body_raw = self.body_text.get("1.0", tk.END).strip()
+        body_raw = body_raw.replace("[DATE]", date_val)
+        return (
+            self.subject_entry.get().strip(),
+            body_raw,
+            self.sender_name.get().strip() or "[Insert Name]",
+            self.sender_position.get().strip() or "[Insert Position]",
+        )
+
+    def _attach_image(self):
+        paths = filedialog.askopenfilenames(
+            title="Attach images or files (PDF, etc.)",
+            filetypes=[("Images & PDFs", "*.png *.jpg *.jpeg *.gif *.webp *.pdf"),
+                       ("Images", "*.png *.jpg *.jpeg *.gif *.webp"),
+                       ("PDF", "*.pdf"),
+                       ("All files", "*.*")])
+        if not paths:
+            return
+        for p in paths:
+            try:
+                with open(p, "rb") as f:
+                    data = f.read()
+                if len(data) > 20 * 1024 * 1024:
+                    messagebox.showwarning("File too large",
+                        f"{os.path.basename(p)} is over 20 MB and was skipped.\n"
+                        "Gmail's total message limit is 25 MB.")
+                    continue
+                ext = os.path.splitext(p)[1].lstrip(".").lower()
+                is_image = ext in ("png", "jpg", "jpeg", "gif", "webp")
+                cid = f"img{len(self.attached_images)}"
+                # tuple: (filename, bytes, cid, is_image)
+                self.attached_images.append(
+                    (os.path.basename(p), data, cid, is_image))
+            except Exception as e:
+                messagebox.showerror("Could not attach",
+                    f"{os.path.basename(p)}: {e}")
+        self._update_img_count()
+
+    def _clear_images(self):
+        self.attached_images = []
+        self._update_img_count()
+
+    def _update_img_count(self):
+        n = len(self.attached_images)
+        if n == 0:
+            self.img_count_var.set("")
+        else:
+            names = ", ".join(a[0] for a in self.attached_images[:2])
+            extra = f" +{n-2} more" if n > 2 else ""
+            self.img_count_var.set(f"{n} attachment(s): {names}{extra}  (click to clear)")
+
+    def _preview(self):
+        subject, body, name, position = self._get_composed()
+        display = (body.replace("[Insert Name]", name)
+                       .replace("[Insert Position]", position))
+        win = tk.Toplevel(self)
+        win.title("Preview")
+        win.geometry("740x660")
+        win.configure(bg=C["bg"])
+
+        ho, hi = self._card(win, padx=20, pady=16)
+        ho.pack(fill="x", padx=24, pady=(20, 0))
+        tk.Label(hi, text=subject,
+                 font=(_RB, 14, "bold"),
+                 fg=C["text"], bg=C["panel"],
+                 wraplength=680, justify="left").pack(anchor="w")
+        tk.Label(hi,
+                 text=f"To: {len(self.recipients)} recipient(s)     "
+                      f"From: {SENDER_EMAIL}",
+                 font=F["small"], fg=C["text_sub"],
+                 bg=C["panel"]).pack(anchor="w", pady=(5, 2))
+        img_note = (f"  {len(self.attached_images)} attachment(s) included."
+                    if self.attached_images else "")
+        tk.Label(hi,
+                 text="Recipients receive a styled HTML email." + img_note,
+                 font=(_RB, 10, "italic"),
+                 fg=C["text_sub"], bg=C["panel"]).pack(anchor="w")
+
+        tk.Frame(win, bg=C["border"], height=1).pack(fill="x", padx=24, pady=10)
+
+        bo, bi = self._card(win, padx=0, pady=0)
+        bo.pack(fill="both", expand=True, padx=24, pady=(0, 24))
+        tsb = tk.Scrollbar(bi, bd=0, width=10)
+        tsb.pack(side="right", fill="y")
+        txt = tk.Text(bi, yscrollcommand=tsb.set,
+                      bg=C["entry_bg"], fg=C["text"],
+                      font=F["body"], relief="flat", bd=0,
+                      wrap="word", padx=16, pady=14,
+                      highlightthickness=0)
+        txt.pack(fill="both", expand=True)
+        tsb.config(command=txt.yview)
+        txt.insert("1.0", display)
+        txt.config(state="disabled")
+
+    def _send_emails(self):
+        subject, body, name, position = self._get_composed()
+        password = APP_PASSWORD
+        if not subject:
+            messagebox.showerror("Missing", "Please enter a subject."); return
+        if not body:
+            messagebox.showerror("Missing", "Body cannot be empty."); return
+        if not self.recipients:
+            messagebox.showerror("No Recipients",
+                "Add at least one recipient."); return
+
+        final_body = (body.replace("[Insert Name]", name)
+                          .replace("[Insert Position]", position))
+
+        # ── Two-step confirmation dialog ──────────────────────
+        confirm_win = tk.Toplevel(self)
+        confirm_win.title("Confirm Send")
+        confirm_win.geometry("520x480")
+        confirm_win.configure(bg=C["bg"])
+        confirm_win.resizable(False, False)
+        confirm_win.grab_set()   # modal
+
+        co, ci = self._card(confirm_win, padx=28, pady=24)
+        co.pack(fill="both", expand=True, padx=20, pady=20)
+
+        tk.Label(ci, text="Ready to Send?",
+                 font=(_RB, 16, "bold"),
+                 fg=C["accent"], bg=C["panel"]).pack(anchor="w")
+        tk.Frame(ci, bg=C["border"], height=1).pack(fill="x", pady=(8, 14))
+
+        def row(label, value):
+            f = tk.Frame(ci, bg=C["panel"])
+            f.pack(fill="x", pady=3)
+            tk.Label(f, text=label, font=F["section"],
+                     fg=C["text_sub"], bg=C["panel"],
+                     width=14, anchor="w").pack(side="left")
+            tk.Label(f, text=value, font=F["body"],
+                     fg=C["text"], bg=C["panel"],
+                     anchor="w", wraplength=320,
+                     justify="left").pack(side="left")
+
+        row("Subject:", subject)
+        row("From:", SENDER_EMAIL)
+        row("Recipients:", str(len(self.recipients)))
+        row("Sender Name:", name)
+        row("Position:", position)
+        row("Date:", self.date_entry.get().strip())
+        if self.attached_images:
+            row("Attachments:", f"{len(self.attached_images)} file(s)")
+
+        # Recipient preview list
+        tk.Frame(ci, bg=C["border"], height=1).pack(fill="x", pady=(12, 6))
+        tk.Label(ci, text="RECIPIENT LIST",
+                 font=F["section"], fg=C["text_sub"],
+                 bg=C["panel"]).pack(anchor="w", pady=(0, 4))
+        preview_list = "\n".join(self.recipients[:6])
+        if len(self.recipients) > 6:
+            preview_list += f"\n  ... and {len(self.recipients)-6} more"
+        tk.Label(ci, text=preview_list,
+                 font=F["small"], fg=C["text"],
+                 bg=C["panel"], justify="left").pack(anchor="w")
+
+        tk.Frame(ci, bg=C["border"], height=1).pack(fill="x", pady=(14, 0))
+
+        confirmed = tk.BooleanVar(value=False)
+
+        def do_send():
+            confirmed.set(True)
+            confirm_win.destroy()
+
+        def do_cancel():
+            confirm_win.destroy()
+
+        btn_row = tk.Frame(ci, bg=C["panel"])
+        btn_row.pack(fill="x", pady=(12, 0))
+        tk.Button(btn_row, text="Cancel",
+                  font=(_RB, 12, "bold"),
+                  bg="#FFFFFF", fg="#000000",
+                  activebackground="#E2EAF6",
+                  activeforeground="#000000",
+                  relief="solid", bd=1,
+                  highlightbackground="#CDD5E0",
+                  padx=18, pady=9, cursor="hand2",
+                  command=do_cancel).pack(side="right", padx=(8, 0))
+        yes_wrap = tk.Frame(btn_row, bg="#0065b2",
+                           highlightbackground="#004a85",
+                           highlightthickness=1)
+        yes_wrap.pack(side="right")
+        yes_lbl = tk.Label(yes_wrap, text="Yes, Send Blast",
+                          font=(_RB, 13, "bold"),
+                          bg="#0065b2", fg="#FFFFFF",
+                          padx=24, pady=11, cursor="hand2")
+        yes_lbl.pack()
+        yes_lbl.bind("<Button-1>", lambda e: do_send())
+        yes_lbl.bind("<Enter>", lambda e: yes_lbl.config(bg="#004a85"))
+        yes_lbl.bind("<Leave>", lambda e: yes_lbl.config(bg="#0065b2"))
+
+        self.wait_window(confirm_win)
+        if not confirmed.get():
+            return
+
+        # Only image attachments get inline cids; PDFs/files attach normally
+        image_cids = [a[2] for a in self.attached_images if a[3]]
+        html_out  = build_html_email(final_body, name, position, image_cids)
+        plain_out = final_body + "\n\nuoh.ewb@gmail.com  |  832-872-5819"
+
+        # Show a "sending..." status so the user doesn't click again
+        self._show_sending_overlay(len(self.recipients))
+        self.update_idletasks()  # render the status before the blocking send
+
+        try:
+            srv = smtplib.SMTP_SSL("smtp.gmail.com", 465)
+            srv.login(SENDER_EMAIL, APP_PASSWORD)
+            sent, failed = [], []
+            for i, addr in enumerate(self.recipients, 1):
+                try:
+                    msg = MIMEMultipart("related")
+                    msg["Subject"] = subject
+                    msg["From"]    = f"EWB-UH <{SENDER_EMAIL}>"
+                    msg["To"]      = addr
+                    alt = MIMEMultipart("alternative")
+                    alt.attach(MIMEText(plain_out, "plain", "utf-8"))
+                    alt.attach(MIMEText(html_out,  "html",  "utf-8"))
+                    msg.attach(alt)
+                    from email.mime.image import MIMEImage
+                    from email.mime.application import MIMEApplication
+                    if _LOGO_BYTES:
+                        lp = MIMEImage(_LOGO_BYTES, _subtype="png")
+                        lp.add_header("Content-ID", "<ewb_logo>")
+                        lp.add_header("Content-Disposition", "inline",
+                                      filename="ewb_logo.png")
+                        msg.attach(lp)
+                    # Attach user files: images inline (cid), others as files
+                    for (fname, data, cid, is_image) in self.attached_images:
+                        if is_image:
+                            ext = os.path.splitext(fname)[1].lstrip(".").lower() or "png"
+                            if ext == "jpg":
+                                ext = "jpeg"
+                            ip = MIMEImage(data, _subtype=ext)
+                            ip.add_header("Content-ID", f"<{cid}>")
+                            ip.add_header("Content-Disposition", "inline",
+                                          filename=fname)
+                            msg.attach(ip)
+                        else:
+                            ap = MIMEApplication(data)
+                            ap.add_header("Content-Disposition", "attachment",
+                                          filename=fname)
+                            msg.attach(ap)
+                    srv.sendmail(SENDER_EMAIL, addr, msg.as_string())
+                    sent.append(addr)
+                    # Update progress
+                    self._update_sending_overlay(i, len(self.recipients))
+                    self.update_idletasks()
+                except Exception as e:
+                    failed.append(f"{addr} - {e}")
+            srv.quit()
+            self._hide_sending_overlay()
+            ts = datetime.now().strftime("%B %d, %Y at %I:%M %p")
+            result = f"Sent successfully to {len(sent)} recipient(s).\n\nSent on {ts}"
+            if failed:
+                result += f"\n\nFailed ({len(failed)}):\n" + "\n".join(failed)
+            messagebox.showinfo("Send Complete", result)
+            # Update the status line in the GUI
+            if hasattr(self, "status_var"):
+                self.status_var.set(f"Last blast sent {ts}  —  {len(sent)} recipient(s)")
+        except smtplib.SMTPAuthenticationError:
+            self._hide_sending_overlay()
+            messagebox.showerror("Authentication Failed",
+                "Gmail rejected the login.\n\n"
+                "Use a Gmail App Password, not your regular password.\n"
+                "myaccount.google.com -> Security -> App Passwords")
+        except Exception as e:
+            self._hide_sending_overlay()
+            messagebox.showerror("Connection Error",
+                f"Could not connect to Gmail:\n{e}")
+
+    # ── Sending overlay (prevents double-send clicks) ─────────
+    def _show_sending_overlay(self, total):
+        # Non-modal: just update the status line and disable nothing fragile.
+        if hasattr(self, "status_var"):
+            self.status_var.set(
+                f"Sending to {total} recipient(s)... please wait, do not click again")
+        self.config(cursor="watch")
+
+    def _update_sending_overlay(self, done, total):
+        if hasattr(self, "status_var"):
+            self.status_var.set(f"Sending... {done} of {total} sent")
+
+    def _hide_sending_overlay(self):
+        self.config(cursor="")
+
+if __name__ == "__main__":
+    app = EWBEmailApp()
+    app.mainloop()
